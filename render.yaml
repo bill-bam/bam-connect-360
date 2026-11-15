@@ -1,0 +1,13 @@
+services:
+  - type: web
+    name: bam-connect-360-trial
+    runtime: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn server:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: CARHUB_API_KEY
+        sync: false
+      - key: BAM_TRIAL_PIN
+        sync: false
+      - key: BAM_MAX_GENERATIONS
+        value: "5"
