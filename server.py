@@ -130,10 +130,10 @@ async def generate(request: Request, images: list[UploadFile] = File(...), frame
     # CarHub's documented direct-media wire format is a multipart request
     # with ONE JSON `inputs` manifest, ONE JSON `params` field, and
     # separately named binary file parts referenced in the manifest.
-    # The array order is front, side-left, rear, side-right.
+    # The array order is front, left, rear, right. Explicitly tag each view.
     input_manifest = []
     image_parts = []
-    view_names = ("front", "side_left", "rear", "side_right")
+    view_names = ("front", "left", "rear", "right")
     mime_ext = {"image/jpeg": "jpg", "image/png": "png", "image/webp": "webp"}
     for i, img in enumerate(images):
         data = await img.read(MAX_IMAGE_BYTES + 1)
@@ -143,7 +143,9 @@ async def generate(request: Request, images: list[UploadFile] = File(...), frame
         if mime not in mime_ext:
             raise HTTPException(415, "Use JPEG, PNG, or WebP photos")
         part_name = view_names[i]
-        input_manifest.append({"file": part_name})
+        # The beta endpoint requires each supplied image to identify its view.
+        # The `file` value references the same-named multipart binary part.
+        input_manifest.append({"file": part_name, "view": part_name})
         image_parts.append((part_name, (f"{part_name}.{mime_ext[mime]}", data, mime)))
 
     files = [
