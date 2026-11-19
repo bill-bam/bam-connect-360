@@ -112,7 +112,64 @@ async def icon():
 async def health():
     # Never return the key, only a coarse status.
     prefix = "test" if KEY.startswith("chk_test_") else "staging" if KEY.startswith("chk_stg_") else "live" if KEY.startswith("chk_live_") else "unknown"
-    return {"ready": configured(), "environment": prefix if KEY else "unconfigured", "remaining_local_jobs": max(0, MAX_JOBS - jobs_started)}
+    return {"ready": configured(), "environment": prefix if KEY else "unconfigured", "remaining_local_jobs": max(0, MAX_JOBS - jobs_started), "integration_mode": "presigned-json-v2"}
+
+
+async def upload_carhub_image(client: httpx.AsyncClient, data: bytes, mime: str, filename: str) -> str:
+    """Use CarHub's documented presigned input-upload API.
+
+    Avoid ambiguous multipart inference requests by uploading bytes first and
+    submitting a normal JSON request using inputs[].ref.
+    """
+    try:
+        slot = await client.post(
+            f"{API_URL}/v1/uploads",
+            headers=carhub_headers(),
+            json={
+                "endpoint": "render.360",
+                "content_type": mime,
+                "filename": filename,
+                "size_bytes": len(data),
+            },
+        )
+    except httpx.HTTPError:
+        raise HTTPException(502, "Unable to reach CarHub upload service")
+    if not slot.is_success:
+        raise HTTPException(
+            502,
+            f"CarHub upload setup rejected: {public_error(slot)} (provider HTTP {slot.status_code})",
+        )
+    try:
+        signed = slot.json()
+        ref = signed["upload_ref"]
+        url = signed["url"]
+        method = signed["method"].upper()
+        signed_headers = signed.get("headers") or {}
+        allowed_bytes = int(signed["max_bytes"])
+    except (ValueError, TypeError, KeyError, AttributeError):
+        raise HTTPException(502, "CarHub upload service returned incomplete instructions")
+    parsed = urlparse(url)
+    if not isinstance(ref, str) or not ref.startswith("upl_"):
+        raise HTTPException(502, "CarHub returned an invalid upload reference")
+    if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password or parsed.hostname in ("localhost", "127.0.0.1", "::1"):
+        raise HTTPException(502, "CarHub returned an unsafe upload URL")
+    if len(data) > allowed_bytes:
+        raise HTTPException(413, "Photo exceeds CarHub upload limit")
+    if method != "PUT":
+        raise HTTPException(502, "CarHub returned an unexpected upload method; size_bytes should enable PUT")
+    if not isinstance(signed_headers, dict):
+        raise HTTPException(502, "CarHub upload service returned invalid headers")
+    headers = {str(k): str(v) for k, v in signed_headers.items()}
+    if not any(k.lower() == "content-type" for k in headers):
+        headers["Content-Type"] = mime
+    # Do NOT pass the CarHub bearer key to presigned storage URLs.
+    try:
+        response = await client.put(url, headers=headers, content=data, follow_redirects=False)
+    except httpx.HTTPError:
+        raise HTTPException(502, "Unable to upload photograph to CarHub storage")
+    if not response.is_success:
+        raise HTTPException(502, f"CarHub signed photo upload failed (HTTP {response.status_code})")
+    return ref
 
 
 @app.post("/api/generate")
@@ -127,14 +184,10 @@ async def generate(request: Request, images: list[UploadFile] = File(...), frame
         raise HTTPException(422, "Exactly four images are required (front, left, rear, right)")
     if frame_count not in (24, 36, 72):
         raise HTTPException(422, "frame_count must be 24, 36 or 72")
-    # CarHub's documented direct-media wire format is a multipart request
-    # with ONE JSON `inputs` manifest, ONE JSON `params` field, and
-    # separately named binary file parts referenced in the manifest.
-    # The array order is front, left, rear, right. Explicitly tag each view.
-    input_manifest = []
-    image_parts = []
+
     view_names = ("front", "left", "rear", "right")
     mime_ext = {"image/jpeg": "jpg", "image/png": "png", "image/webp": "webp"}
+    input_blobs = []
     for i, img in enumerate(images):
         data = await img.read(MAX_IMAGE_BYTES + 1)
         if not data or len(data) > MAX_IMAGE_BYTES:
@@ -142,37 +195,51 @@ async def generate(request: Request, images: list[UploadFile] = File(...), frame
         mime = img.content_type
         if mime not in mime_ext:
             raise HTTPException(415, "Use JPEG, PNG, or WebP photos")
-        part_name = view_names[i]
-        # The beta endpoint requires each supplied image to identify its view.
-        # The `file` value references the same-named multipart binary part.
-        input_manifest.append({"file": part_name, "view": part_name})
-        image_parts.append((part_name, (f"{part_name}.{mime_ext[mime]}", data, mime)))
+        input_blobs.append((data, mime, f"bam360_{view_names[i]}.{mime_ext[mime]}"))
 
-    files = [
-        ("inputs", (None, json.dumps(input_manifest), "application/json")),
-        ("params", (None, json.dumps({"frame_count": frame_count}), "application/json")),
-        *image_parts,
-    ]
     raw_id = request.headers.get("X-BAM-Request-ID", "")
     try:
         idem = str(uuid.UUID(raw_id)) if raw_id else str(uuid.uuid4())
     except ValueError:
         raise HTTPException(400, "Invalid idempotency request ID")
-    try:
-        async with httpx.AsyncClient(timeout=httpx.Timeout(120, connect=15)) as client:
-            response = await client.post(f"{API_URL}/v1/render/360", headers=carhub_headers(idem), files=files)
-    except httpx.HTTPError:
-        raise HTTPException(502, "Could not reach CarHub. Check connectivity and API hostname.")
+
+    async with httpx.AsyncClient(timeout=httpx.Timeout(120, connect=15)) as client:
+        input_refs = []
+        for role, (data, mime, filename) in zip(view_names, input_blobs):
+            upload_ref = await upload_carhub_image(client, data, mime, filename)
+            input_refs.append({"ref": upload_ref, "role": role})
+        # CarHub documents this REST JSON format in /api-reference/conventions:
+        # exactly four media objects in inputs[], referenced with ref=upload_ref.
+        body = {
+            "inputs": input_refs,
+            "params": {
+                "quality": 480,
+                "frame_count": frame_count,
+                "viewer": False,
+                "output_format": "jpg",
+            },
+        }
+        try:
+            response = await client.post(
+                f"{API_URL}/v1/render/360",
+                headers=carhub_headers(idem),
+                json=body,
+            )
+        except httpx.HTTPError:
+            raise HTTPException(502, "Unable to reach CarHub 360 generation service")
     if not response.is_success:
-        return JSONResponse({"error": public_error(response), "provider_status": response.status_code}, status_code=400 if response.status_code in (400, 403, 404, 422) else 502)
+        return JSONResponse(
+            {"error": public_error(response), "provider_status": response.status_code},
+            status_code=400 if response.status_code in (400, 403, 404, 422) else 502,
+        )
     try:
-        body = response.json()
+        response_body = response.json()
     except ValueError:
         raise HTTPException(502, "CarHub returned an unreadable response")
-    job = unwrap_job(body)
+    job = unwrap_job(response_body)
     job_id = job.get("id") or job.get("job_id")
     if not isinstance(job_id, str):
-        raise HTTPException(502, "CarHub accepted the request but returned no job ID. Check raw API response in provider dashboard.")
+        raise HTTPException(502, "CarHub accepted the request but returned no job ID")
     jobs_started += 1
     known_jobs[job_id] = time.time()
     return {"job_id": job_id, "status": job.get("status", "queued"), "provider_status": response.status_code}
