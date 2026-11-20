@@ -115,7 +115,7 @@ async def icon():
 async def health():
     # Never return the key, only a coarse status.
     prefix = "test" if KEY.startswith("chk_test_") else "staging" if KEY.startswith("chk_stg_") else "live" if KEY.startswith("chk_live_") else "unknown"
-    return {"ready": configured(), "environment": prefix if KEY else "unconfigured", "remaining_local_jobs": max(0, MAX_JOBS - jobs_started), "background_configured": bool(BACKGROUND_ASSET_ID), "background_asset_id": BACKGROUND_ASSET_ID, "default_quality": 1080, "default_frames": 152, "video_fps": 30, "request_modes": ["studio", "legacy"], "version": "diagnostic-v4"}
+    return {"ready": configured(), "environment": prefix if KEY else "unconfigured", "remaining_local_jobs": max(0, MAX_JOBS - jobs_started), "background_configured": bool(BACKGROUND_ASSET_ID), "background_asset_id": BACKGROUND_ASSET_ID, "default_quality": 1080, "default_frames": 152, "video_fps": 30, "request_modes": ["canonical"], "version": "canonical-v5"}
 
 
 @app.post("/api/check-upload")
@@ -157,14 +157,18 @@ async def generate(request: Request, images: list[UploadFile] = File(...), frame
         raise HTTPException(422, "frame_count must be 24, 36, 72, 96 or 152")
     if quality not in (480, 768, 1080):
         raise HTTPException(422, "quality must be 480, 768 or 1080")
-    if request_format not in ("legacy", "studio"):
-        raise HTTPException(422, "request_format must be legacy or studio")
-    if request_format == "legacy":
-        if use_background or frame_count not in (24, 36, 72):
-            raise HTTPException(422, "Original legacy request only supports 24/36/72 frames and no studio background")
-    elif use_background and not BACKGROUND_ASSET_ID:
+    # CarHub's canonical API v2 contract (API conventions, 20 November 2026):
+    # `inputs` (one JSON ARRAY) maps four named multipart photo parts through
+    # each object's `file` property, and `params` is one JSON OBJECT. Both
+    # fields are included once with Content-Type: application/json.
+    # Older browser sessions may still send `request_format=studio`.
+    if request_format not in ("canonical", "studio"):
+        raise HTTPException(422, "Update the PWA to use the documented CarHub request format")
+    if use_background and not BACKGROUND_ASSET_ID:
         raise HTTPException(503, "CARHUB_BACKGROUND_ASSET_ID is not configured")
-    files = []
+    input_roles = ("front", "side-left", "rear", "side-right")
+    inputs = []
+    photo_parts = []
     for i, img in enumerate(images):
         data = await img.read(MAX_IMAGE_BYTES + 1)
         if not data or len(data) > MAX_IMAGE_BYTES:
@@ -172,22 +176,23 @@ async def generate(request: Request, images: list[UploadFile] = File(...), frame
         mime = img.content_type
         if mime not in ("image/jpeg", "image/png", "image/webp"):
             raise HTTPException(415, "Use JPEG, PNG, or WebP photos")
-        files.append(("images", (f"{['front','left','rear','right'][i]}.{ {'image/jpeg':'jpg','image/png':'png','image/webp':'webp'}[mime] }", data, mime)))
-    # One explicit provider request per click. Never retry chargeable rendering automatically.
-    # Legacy mode exactly matches the four-image, flat-field format from the
-    # originally working BAM trial; studio mode is the Aurel 20 Nov nested params.
-    params = {"quality": quality, "frame_count": frame_count, "output_format": "jpg"}
-    form_data = None
-    if request_format == "legacy":
-        for name, value in (("frame_count", str(frame_count)), ("output_format", "jpg"), ("viewer", "false")):
-            files.append((name, (None, value)))
-    else:
-        if use_background:
-            params["background"] = {"asset_id": BACKGROUND_ASSET_ID, "image_ratio": "16:9"}
-        form_data = {"params": json.dumps(params, separators=(",", ":"))}
-    request_info = {"format": request_format, "photo_count": len(images),
-                    "multipart_file_fields": ["images"] * len(images),
-                    "metadata_fields": ["frame_count", "output_format", "viewer"] if request_format == "legacy" else ["params"]}
+        part_name = f"photo_{i + 1}"
+        extension = {"image/jpeg": "jpg", "image/png": "png", "image/webp": "webp"}[mime]
+        inputs.append({"file": part_name, "client_id": input_roles[i]})
+        photo_parts.append((part_name, (f"{part_name}.{extension}", data, mime)))
+    params = {"quality": quality, "frame_count": frame_count, "output_format": "jpg", "viewer": False}
+    if use_background:
+        params["background"] = {"asset_id": BACKGROUND_ASSET_ID, "image_ratio": "16:9"}
+    files = [
+        ("inputs", (None, json.dumps(inputs, separators=(",", ":")), "application/json")),
+        ("params", (None, json.dumps(params, separators=(",", ":")), "application/json")),
+        *photo_parts,
+    ]
+    request_info = {
+        "format": "canonical-v5", "photo_count": len(images),
+        "multipart_file_fields": [part[0] for part in photo_parts],
+        "metadata_fields": ["inputs", "params"],
+    }
     raw_id = request.headers.get("X-BAM-Request-ID", "")
     try:
         idem = str(uuid.UUID(raw_id)) if raw_id else str(uuid.uuid4())
@@ -198,7 +203,6 @@ async def generate(request: Request, images: list[UploadFile] = File(...), frame
             response = await client.post(
                 f"{API_URL}/v1/render/360",
                 headers=carhub_headers(idem),
-                **({"data": form_data} if form_data is not None else {}),
                 files=files,
             )
     except httpx.HTTPError:
@@ -217,7 +221,7 @@ async def generate(request: Request, images: list[UploadFile] = File(...), frame
         raise HTTPException(502, "CarHub accepted the request but returned no job ID. Check raw API response in provider dashboard.")
     jobs_started += 1
     known_jobs[job_id] = time.time()
-    return {"job_id": job_id, "status": job.get("status", "queued"), "provider_status": response.status_code, "submitted_params": params if request_format == "studio" else {"frame_count": frame_count}, "request_info": request_info}
+    return {"job_id": job_id, "status": job.get("status", "queued"), "provider_status": response.status_code, "submitted_params": params, "request_info": request_info}
 
 
 async def provider_job(job_id: str) -> dict:
