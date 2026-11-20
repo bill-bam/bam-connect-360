@@ -115,11 +115,36 @@ async def icon():
 async def health():
     # Never return the key, only a coarse status.
     prefix = "test" if KEY.startswith("chk_test_") else "staging" if KEY.startswith("chk_stg_") else "live" if KEY.startswith("chk_live_") else "unknown"
-    return {"ready": configured(), "environment": prefix if KEY else "unconfigured", "remaining_local_jobs": max(0, MAX_JOBS - jobs_started), "background_configured": bool(BACKGROUND_ASSET_ID), "background_asset_id": BACKGROUND_ASSET_ID, "default_quality": 1080, "default_frames": 152, "video_fps": 30, "version": "studio-152-v3"}
+    return {"ready": configured(), "environment": prefix if KEY else "unconfigured", "remaining_local_jobs": max(0, MAX_JOBS - jobs_started), "background_configured": bool(BACKGROUND_ASSET_ID), "background_asset_id": BACKGROUND_ASSET_ID, "default_quality": 1080, "default_frames": 152, "video_fps": 30, "request_modes": ["studio", "legacy"], "version": "diagnostic-v4"}
+
+
+@app.post("/api/check-upload")
+async def check_upload(request: Request, images: list[UploadFile] = File(...)):
+    """No-cost diagnostic: validate PWA -> BAM proxy upload, NEVER call CarHub."""
+    auth(request)
+    if len(images) != 4:
+        raise HTTPException(422, f"BAM received {len(images)} photographs; exactly four required")
+    from PIL import Image
+    positions = ("front", "left", "rear", "right")
+    received = []
+    for index, img in enumerate(images):
+        contents = await img.read(MAX_IMAGE_BYTES + 1)
+        if not contents or len(contents) > MAX_IMAGE_BYTES:
+            raise HTTPException(413, f"Photo {index + 1}: empty or larger than 20 MiB")
+        if img.content_type not in ("image/jpeg", "image/png", "image/webp"):
+            raise HTTPException(415, f"Photo {index + 1}: unsupported image type")
+        try:
+            with Image.open(io.BytesIO(contents)) as im:
+                im.verify()
+        except Exception:
+            raise HTTPException(422, f"Photo {index + 1}: unable to decode image")
+        received.append({"position": positions[index], "bytes": len(contents), "mime": img.content_type})
+    return {"ok": True, "count": len(received), "received": received,
+            "notice": "BAM received four valid images. CarHub was NOT contacted and no generation was charged."}
 
 
 @app.post("/api/generate")
-async def generate(request: Request, images: list[UploadFile] = File(...), frame_count: int = Form(152), quality: int = Form(1080), use_background: bool = Form(True)):
+async def generate(request: Request, images: list[UploadFile] = File(...), frame_count: int = Form(152), quality: int = Form(1080), use_background: bool = Form(True), request_format: str = Form("studio")):
     global jobs_started
     auth(request)
     if not KEY:
@@ -132,7 +157,12 @@ async def generate(request: Request, images: list[UploadFile] = File(...), frame
         raise HTTPException(422, "frame_count must be 24, 36, 72, 96 or 152")
     if quality not in (480, 768, 1080):
         raise HTTPException(422, "quality must be 480, 768 or 1080")
-    if use_background and not BACKGROUND_ASSET_ID:
+    if request_format not in ("legacy", "studio"):
+        raise HTTPException(422, "request_format must be legacy or studio")
+    if request_format == "legacy":
+        if use_background or frame_count not in (24, 36, 72):
+            raise HTTPException(422, "Original legacy request only supports 24/36/72 frames and no studio background")
+    elif use_background and not BACKGROUND_ASSET_ID:
         raise HTTPException(503, "CARHUB_BACKGROUND_ASSET_ID is not configured")
     files = []
     for i, img in enumerate(images):
@@ -143,17 +173,21 @@ async def generate(request: Request, images: list[UploadFile] = File(...), frame
         if mime not in ("image/jpeg", "image/png", "image/webp"):
             raise HTTPException(415, "Use JPEG, PNG, or WebP photos")
         files.append(("images", (f"{['front','left','rear','right'][i]}.{ {'image/jpeg':'jpg','image/png':'png','image/webp':'webp'}[mime] }", data, mime)))
-    # Aurel's updated specification (20 November 2026): send nested `params`
-    # alongside four ordered `images` multipart parts. Do NOT perform a second
-    # chargeable render request on error; report validation errors to the user.
+    # One explicit provider request per click. Never retry chargeable rendering automatically.
+    # Legacy mode exactly matches the four-image, flat-field format from the
+    # originally working BAM trial; studio mode is the Aurel 20 Nov nested params.
     params = {"quality": quality, "frame_count": frame_count, "output_format": "jpg"}
-    if use_background:
-        params["background"] = {"asset_id": BACKGROUND_ASSET_ID, "image_ratio": "16:9"}
-    # Send metadata as multipart text data, not as an extra file part.
-    # CarHub validates exactly four uploaded inputs; sending `params` inside
-    # `files=` can be interpreted as a fifth input and trigger the provider
-    # error "must contain 4 to 4 inputs".
-    form_data = {"params": json.dumps(params, separators=(",", ":"))}
+    form_data = None
+    if request_format == "legacy":
+        for name, value in (("frame_count", str(frame_count)), ("output_format", "jpg"), ("viewer", "false")):
+            files.append((name, (None, value)))
+    else:
+        if use_background:
+            params["background"] = {"asset_id": BACKGROUND_ASSET_ID, "image_ratio": "16:9"}
+        form_data = {"params": json.dumps(params, separators=(",", ":"))}
+    request_info = {"format": request_format, "photo_count": len(images),
+                    "multipart_file_fields": ["images"] * len(images),
+                    "metadata_fields": ["frame_count", "output_format", "viewer"] if request_format == "legacy" else ["params"]}
     raw_id = request.headers.get("X-BAM-Request-ID", "")
     try:
         idem = str(uuid.UUID(raw_id)) if raw_id else str(uuid.uuid4())
@@ -164,13 +198,15 @@ async def generate(request: Request, images: list[UploadFile] = File(...), frame
             response = await client.post(
                 f"{API_URL}/v1/render/360",
                 headers=carhub_headers(idem),
-                data=form_data,
+                **({"data": form_data} if form_data is not None else {}),
                 files=files,
             )
     except httpx.HTTPError:
         raise HTTPException(502, "Could not reach CarHub. Check connectivity and API hostname.")
     if not response.is_success:
-        return JSONResponse({"error": public_error(response), "provider_status": response.status_code}, status_code=400 if response.status_code in (400, 403, 404, 422) else 502)
+        return JSONResponse({"error": public_error(response), "provider_status": response.status_code,
+                             "request_info": request_info},
+                            status_code=400 if response.status_code in (400, 403, 404, 422) else 502)
     try:
         body = response.json()
     except ValueError:
@@ -181,7 +217,7 @@ async def generate(request: Request, images: list[UploadFile] = File(...), frame
         raise HTTPException(502, "CarHub accepted the request but returned no job ID. Check raw API response in provider dashboard.")
     jobs_started += 1
     known_jobs[job_id] = time.time()
-    return {"job_id": job_id, "status": job.get("status", "queued"), "provider_status": response.status_code, "submitted_params": params}
+    return {"job_id": job_id, "status": job.get("status", "queued"), "provider_status": response.status_code, "submitted_params": params if request_format == "studio" else {"frame_count": frame_count}, "request_info": request_info}
 
 
 async def provider_job(job_id: str) -> dict:
