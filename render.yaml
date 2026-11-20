@@ -9,5 +9,7 @@ services:
         sync: false
       - key: BAM_TRIAL_PIN
         sync: false
+      - key: CARHUB_BACKGROUND_ASSET_ID
+        value: "01a1f8d3-6dcd-7ba9-ad18-6ece95c24d53"
       - key: BAM_MAX_GENERATIONS
         value: "5"
