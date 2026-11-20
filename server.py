@@ -115,7 +115,7 @@ async def icon():
 async def health():
     # Never return the key, only a coarse status.
     prefix = "test" if KEY.startswith("chk_test_") else "staging" if KEY.startswith("chk_stg_") else "live" if KEY.startswith("chk_live_") else "unknown"
-    return {"ready": configured(), "environment": prefix if KEY else "unconfigured", "remaining_local_jobs": max(0, MAX_JOBS - jobs_started), "background_configured": bool(BACKGROUND_ASSET_ID), "background_asset_id": BACKGROUND_ASSET_ID, "default_quality": 1080, "default_frames": 152, "video_fps": 30, "version": "studio-152-v2"}
+    return {"ready": configured(), "environment": prefix if KEY else "unconfigured", "remaining_local_jobs": max(0, MAX_JOBS - jobs_started), "background_configured": bool(BACKGROUND_ASSET_ID), "background_asset_id": BACKGROUND_ASSET_ID, "default_quality": 1080, "default_frames": 152, "video_fps": 30, "version": "studio-152-v3"}
 
 
 @app.post("/api/generate")
@@ -149,7 +149,11 @@ async def generate(request: Request, images: list[UploadFile] = File(...), frame
     params = {"quality": quality, "frame_count": frame_count, "output_format": "jpg"}
     if use_background:
         params["background"] = {"asset_id": BACKGROUND_ASSET_ID, "image_ratio": "16:9"}
-    files.append(("params", (None, json.dumps(params, separators=(",", ":")))))
+    # Send metadata as multipart text data, not as an extra file part.
+    # CarHub validates exactly four uploaded inputs; sending `params` inside
+    # `files=` can be interpreted as a fifth input and trigger the provider
+    # error "must contain 4 to 4 inputs".
+    form_data = {"params": json.dumps(params, separators=(",", ":"))}
     raw_id = request.headers.get("X-BAM-Request-ID", "")
     try:
         idem = str(uuid.UUID(raw_id)) if raw_id else str(uuid.uuid4())
@@ -157,7 +161,12 @@ async def generate(request: Request, images: list[UploadFile] = File(...), frame
         raise HTTPException(400, "Invalid idempotency request ID")
     try:
         async with httpx.AsyncClient(timeout=httpx.Timeout(120, connect=15)) as client:
-            response = await client.post(f"{API_URL}/v1/render/360", headers=carhub_headers(idem), files=files)
+            response = await client.post(
+                f"{API_URL}/v1/render/360",
+                headers=carhub_headers(idem),
+                data=form_data,
+                files=files,
+            )
     except httpx.HTTPError:
         raise HTTPException(502, "Could not reach CarHub. Check connectivity and API hostname.")
     if not response.is_success:
