@@ -34,6 +34,19 @@ known_jobs: dict[str, float] = {}
 app = FastAPI(title="BAM.Connect 360 Trial", docs_url=None, redoc_url=None)
 
 
+
+
+@app.get("/bmw-viewer")
+async def bmw_viewer():
+    """Interactive demonstration built from the uploaded BMW 360 marketing video."""
+    return FileResponse(ROOT / "bmw-viewer.html", media_type="text/html")
+
+
+@app.get("/bmw-viewer.mp4")
+async def bmw_viewer_video():
+    return FileResponse(ROOT / "bmw-viewer.mp4", media_type="video/mp4")
+
+
 def auth(request: Request):
     if not PIN:
         raise HTTPException(503, "Server trial PIN has not been configured")
