@@ -93,7 +93,7 @@ def public_error(response: httpx.Response):
 
 @app.get("/")
 async def homepage():
-    return FileResponse(ROOT / "index.html", media_type="text/html")
+    return FileResponse(ROOT / "index.html", media_type="text/html", headers={"Cache-Control": "no-store, max-age=0"})
 
 
 @app.get("/manifest.webmanifest")
@@ -103,7 +103,7 @@ async def manifest():
 
 @app.get("/sw.js")
 async def sw():
-    return FileResponse(ROOT / "sw.js", media_type="application/javascript")
+    return FileResponse(ROOT / "sw.js", media_type="application/javascript", headers={"Cache-Control": "no-store, max-age=0"})
 
 
 @app.get("/icon.svg")
@@ -115,7 +115,7 @@ async def icon():
 async def health():
     # Never return the key, only a coarse status.
     prefix = "test" if KEY.startswith("chk_test_") else "staging" if KEY.startswith("chk_stg_") else "live" if KEY.startswith("chk_live_") else "unknown"
-    return {"ready": configured(), "environment": prefix if KEY else "unconfigured", "remaining_local_jobs": max(0, MAX_JOBS - jobs_started), "background_configured": bool(BACKGROUND_ASSET_ID), "background_asset_id": BACKGROUND_ASSET_ID, "default_quality": 1080, "default_frames": 152, "video_fps": 30, "request_modes": ["canonical"], "version": "canonical-v5"}
+    return {"ready": configured(), "environment": prefix if KEY else "unconfigured", "remaining_local_jobs": max(0, MAX_JOBS - jobs_started), "background_configured": bool(BACKGROUND_ASSET_ID), "background_asset_id": BACKGROUND_ASSET_ID, "default_quality": 1080, "default_frames": 152, "video_fps": 30, "request_modes": ["canonical", "studio", "legacy"], "accepts_older_client": True, "version": "role-v7", "capture_roles": ["front", "left", "rear", "right"]}
 
 
 @app.post("/api/check-upload")
@@ -139,7 +139,7 @@ async def check_upload(request: Request, images: list[UploadFile] = File(...)):
         except Exception:
             raise HTTPException(422, f"Photo {index + 1}: unable to decode image")
         received.append({"position": positions[index], "bytes": len(contents), "mime": img.content_type})
-    return {"ok": True, "count": len(received), "received": received,
+    return {"ok": True, "count": len(received), "received": received, "outbound_roles": ["front", "left", "rear", "right"],
             "notice": "BAM received four valid images. CarHub was NOT contacted and no generation was charged."}
 
 
@@ -161,12 +161,17 @@ async def generate(request: Request, images: list[UploadFile] = File(...), frame
     # `inputs` (one JSON ARRAY) maps four named multipart photo parts through
     # each object's `file` property, and `params` is one JSON OBJECT. Both
     # fields are included once with Content-Type: application/json.
-    # Older browser sessions may still send `request_format=studio`.
-    if request_format not in ("canonical", "studio"):
-        raise HTTPException(422, "Update the PWA to use the documented CarHub request format")
+    # v4 diagnostic browser sessions may still send `legacy` or `studio` even
+    # after the server has deployed v5/v6. Never reject these *client-side*
+    # switches: the provider payload is always the documented canonical form.
+    # Preserve the client's own frame-count, quality and background selections;
+    # a legacy baseline should remain 36 frames with background disabled.
+    request_format = (request_format or "canonical").strip().lower()
+    if request_format not in ("canonical", "studio", "legacy"):
+        raise HTTPException(422, "Unsupported trial request format. Refresh the browser to update the PWA.")
     if use_background and not BACKGROUND_ASSET_ID:
         raise HTTPException(503, "CARHUB_BACKGROUND_ASSET_ID is not configured")
-    input_roles = ("front", "side-left", "rear", "side-right")
+    input_roles = ("front", "left", "rear", "right")
     inputs = []
     photo_parts = []
     for i, img in enumerate(images):
@@ -178,7 +183,10 @@ async def generate(request: Request, images: list[UploadFile] = File(...), frame
             raise HTTPException(415, "Use JPEG, PNG, or WebP photos")
         part_name = f"photo_{i + 1}"
         extension = {"image/jpeg": "jpg", "image/png": "png", "image/webp": "webp"}[mime]
-        inputs.append({"file": part_name, "client_id": input_roles[i]})
+        # The provider uses `role` to map each image to a required 360 view.
+        # `client_id` alone is insufficient and caused HTTP 400:
+        # "must identify front, left, rear, or right".
+        inputs.append({"file": part_name, "role": input_roles[i], "client_id": f"bam_{input_roles[i]}"})
         photo_parts.append((part_name, (f"{part_name}.{extension}", data, mime)))
     params = {"quality": quality, "frame_count": frame_count, "output_format": "jpg", "viewer": False}
     if use_background:
@@ -189,7 +197,7 @@ async def generate(request: Request, images: list[UploadFile] = File(...), frame
         *photo_parts,
     ]
     request_info = {
-        "format": "canonical-v5", "photo_count": len(images),
+        "format": "role-v7", "received_client_mode": request_format, "photo_count": len(images),
         "multipart_file_fields": [part[0] for part in photo_parts],
         "metadata_fields": ["inputs", "params"],
     }
