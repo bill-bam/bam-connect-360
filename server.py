@@ -134,15 +134,7 @@ async def generate(request: Request, images: list[UploadFile] = File(...), frame
         raise HTTPException(422, "Exactly four images are required (front, left, rear, right)")
     if frame_count not in (24, 36, 72):
         raise HTTPException(422, "frame_count must be 24, 36 or 72")
-    # CarHub requires a single JSON `inputs` multipart field, a single JSON
-    # `params` field, and four named image parts. In response to CarHub's
-    # "must identify front, left, rear, or right" validation message, use
-    # exactly those canonical view labels on both the upload parts and the
-    # manifest. Explicitly associate each uploaded file with its view.
-    # This format is locally validated but still needs a real provider test.
-    image_fields = []
-    manifest = []
-    views = ("front", "left", "rear", "right")
+    files = []
     for i, img in enumerate(images):
         data = await img.read(MAX_IMAGE_BYTES + 1)
         if not data or len(data) > MAX_IMAGE_BYTES:
@@ -150,20 +142,10 @@ async def generate(request: Request, images: list[UploadFile] = File(...), frame
         mime = img.content_type
         if mime not in ("image/jpeg", "image/png", "image/webp"):
             raise HTTPException(415, "Use JPEG, PNG, or WebP photos")
-        view = views[i]
-        ext = {"image/jpeg": "jpg", "image/png": "png", "image/webp": "webp"}[mime]
-        manifest.append({"file": view, "view": view, "client_id": f"bam360-{view}"})
-        image_fields.append((view, (f"{view}.{ext}", data, mime)))
-
-    # httpx encodes (None, JSON string, application/json) as a multipart text
-    # part with the required field content type; filenames are omitted.
-    files = [
-        ("inputs", (None, json.dumps(manifest), "application/json")),
-        ("params", (None, json.dumps({"frame_count": frame_count,
-                                       "output_format": "jpg",
-                                       "viewer": False}), "application/json")),
-        *image_fields,
-    ]
+        files.append(("images", (f"{['front','left','rear','right'][i]}.{ {'image/jpeg':'jpg','image/png':'png','image/webp':'webp'}[mime] }", data, mime)))
+    # API documentation confirms repeated `images` parts and optional frame settings.
+    for name, value in [("frame_count", str(frame_count)), ("output_format", "jpg"), ("viewer", "false")]:
+        files.append((name, (None, value)))
     raw_id = request.headers.get("X-BAM-Request-ID", "")
     try:
         idem = str(uuid.UUID(raw_id)) if raw_id else str(uuid.uuid4())
