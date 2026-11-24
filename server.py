@@ -134,13 +134,15 @@ async def generate(request: Request, images: list[UploadFile] = File(...), frame
         raise HTTPException(422, "Exactly four images are required (front, left, rear, right)")
     if frame_count not in (24, 36, 72):
         raise HTTPException(422, "frame_count must be 24, 36 or 72")
-    # CarHub requires EXACTLY ONE JSON multipart field named `inputs` and
-    # EXACTLY ONE named `params`, in addition to one distinct file part for
-    # each photograph. Its four-view order is front, side-left, rear,
-    # side-right. Do not send repeated `images` or individual setting fields.
-    # See https://docs.trycarhub.com/guides/uploads
+    # CarHub requires a single JSON `inputs` multipart field, a single JSON
+    # `params` field, and four named image parts. In response to CarHub's
+    # "must identify front, left, rear, or right" validation message, use
+    # exactly those canonical view labels on both the upload parts and the
+    # manifest. Explicitly associate each uploaded file with its view.
+    # This format is locally validated but still needs a real provider test.
     image_fields = []
     manifest = []
+    views = ("front", "left", "rear", "right")
     for i, img in enumerate(images):
         data = await img.read(MAX_IMAGE_BYTES + 1)
         if not data or len(data) > MAX_IMAGE_BYTES:
@@ -148,10 +150,10 @@ async def generate(request: Request, images: list[UploadFile] = File(...), frame
         mime = img.content_type
         if mime not in ("image/jpeg", "image/png", "image/webp"):
             raise HTTPException(415, "Use JPEG, PNG, or WebP photos")
-        name = ("front", "side_left", "rear", "side_right")[i]
+        view = views[i]
         ext = {"image/jpeg": "jpg", "image/png": "png", "image/webp": "webp"}[mime]
-        manifest.append({"file": name, "client_id": f"bam360-{name}"})
-        image_fields.append((name, (f"{name}.{ext}", data, mime)))
+        manifest.append({"file": view, "view": view, "client_id": f"bam360-{view}"})
+        image_fields.append((view, (f"{view}.{ext}", data, mime)))
 
     # httpx encodes (None, JSON string, application/json) as a multipart text
     # part with the required field content type; filenames are omitted.
