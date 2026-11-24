@@ -14,9 +14,16 @@ main{max-width:1050px;margin:auto;padding:40px 20px 70px}.eyebrow{font-size:11px
 .video-spinner{flex:none;width:26px;height:26px;border:3px solid #eee;border-top-color:#e62237;border-radius:50%;animation:video-spin 1s linear infinite}
 .video-progress h2{font-size:18px;margin:0 0 8px}.video-progress p{margin:0 0 8px;font-size:14px;line-height:1.55;color:#666}.video-progress .btn{margin:8px 8px 0 0}.video-progress a{display:inline-block;text-decoration:none}.video-time{font-variant-numeric:tabular-nums;font-size:13px;color:#777}
 @keyframes video-spin{to{transform:rotate(360deg)}}@media(prefers-reduced-motion:reduce){.video-spinner{animation:none}}
+
+.vehicle-reference{display:flex;gap:18px;align-items:center;justify-content:space-between;flex-wrap:wrap;background:white;border:1px solid #dedee3;border-radius:14px;padding:20px;margin-bottom:20px}.vehicle-reference h2{font-size:24px;margin:0 0 8px;letter-spacing:-.5px}.bam-reference{font-size:14px;color:#666}.registration-plate{display:flex;align-items:stretch;background:#f5d322;border:2px solid #292929;border-radius:8px;overflow:hidden;color:#111;flex:none}.plate-country{background:#1c5e9c;color:white;display:grid;place-items:center;padding:0 10px;font-size:14px;font-weight:900}.plate-number{font-family:Arial,Helvetica,sans-serif;font-weight:900;font-size:32px;letter-spacing:3px;padding:8px 16px;white-space:nowrap}.vehicle-vin{font-size:13px;color:#666;margin-top:8px;word-break:break-all}.vin-only{background:#191919;color:#ddd;border:1px solid #777;border-radius:8px;padding:12px;font-family:monospace;font-size:18px;letter-spacing:1px;word-break:break-all}
+@media(max-width:560px){.vehicle-reference{padding:16px;gap:12px}.vehicle-reference h2{font-size:21px}.plate-number{font-size:27px}}
 </style></head><body>
 <header><div style="display:flex;align-items:center;gap:13px"><div class="brand">BAM<em>.</em></div><div class="brand-sub">CONNECT 360</div></div><div class="head-right">INTERACTIVE VEHICLE PRESENTATION</div></header>
 <main><div class="intro"><div class="eyebrow">YOUR VEHICLE · 360° VIEW</div><h1>Explore the vehicle from every angle.</h1><p>Swipe, drag or use the controls to rotate the vehicle. Download the marketing video below.</p></div>
+<section id="vehicleReference" class="vehicle-reference" hidden aria-label="Vehicle and BAM job details">
+<div><h2 id="vehicleMakeModel"></h2><div class="bam-reference" id="bamReference"></div><div class="vehicle-vin" id="vehicleVin" hidden></div></div>
+<div><div class="registration-plate" id="vehiclePlate" hidden><span class="plate-country">UK</span><span class="plate-number" id="plateNumber"></span></div><div class="vin-only" id="vinOnly" hidden></div></div>
+</section>
 <section class="card"><div class="stage" id="stage" aria-label="Swipe or drag to rotate the vehicle"><img id="img" alt="AI-generated 360-degree view of vehicle" draggable="false"><div class="frame-badge">360° INTERACTIVE</div><div class="angle-badge" id="angle">0°</div><div class="loading" id="loading"><div class="load-inner"><div id="loadText">Connecting to your vehicle presentation…</div><div class="load-message" id="loadDetail">Retrieving the 360° image sequence.</div><button class="btn red" id="retryLoad" type="button" hidden>Try again</button></div></div></div>
 <div class="bar"><div class="controls"><button id="previous" class="btn" aria-label="Rotate left">‹</button><button id="play" class="btn dark" disabled>▶ Auto rotate</button><button id="next" class="btn" aria-label="Rotate right">›</button><button id="zoomOut" class="btn" aria-label="Zoom out">− Zoom</button><button id="zoomIn" class="btn" aria-label="Zoom in">＋ Zoom</button><button id="reset" class="btn">Reset</button><button id="fullscreen" class="btn" aria-label="Full screen">⛶</button></div>
 <input type="range" id="scrub" min="0" max="1" value="0" aria-label="Vehicle rotation"><div class="status small" id="status"></div></div></section>
@@ -34,6 +41,18 @@ main{max-width:1050px;margin:auto;padding:40px 20px 70px}.eyebrow{font-size:11px
 (()=>{'use strict';
 const $=id=>document.getElementById(id),token=decodeURIComponent(location.pathname.split('/').filter(Boolean).pop()||'');
 let frames=[],i=0,timer=null,zoom=1,dragging=false,startX=0;
+function showVehicleDetails(details){
+ if(!details||typeof details!=='object')return;
+ const makeModel=[details.make,details.model].filter(value=>typeof value==='string'&&value.trim()).join(' ');
+ $('vehicleMakeModel').textContent=makeModel||'Vehicle presentation';
+ $('bamReference').textContent=details.bam_reference?'BAM job reference: '+details.bam_reference:'';
+ const registration=typeof details.registration==='string'?details.registration:'';
+ const vin=typeof details.vin==='string'?details.vin:'';
+ $('plateNumber').textContent=registration;$('vehiclePlate').hidden=!registration;
+ $('vehicleVin').textContent=vin?'VIN: '+vin:'';$('vehicleVin').hidden=!vin||!registration;
+ $('vinOnly').textContent=vin?'VIN '+vin:'';$('vinOnly').hidden=!!registration||!vin;
+ $('vehicleReference').hidden=!(makeModel||details.bam_reference||registration||vin);
+}
 function urlFor(f){return f.url}
 function show(n){if(!frames.length)return;i=(n+frames.length)%frames.length;const f=frames[i];$('img').src=urlFor(f);$('scrub').value=String(i);$('angle').textContent=Math.round(Number(f.angle)||i*360/frames.length)+'°'}
 function stop(){if(timer)clearInterval(timer);timer=null;$('play').textContent='▶ Auto rotate'}
@@ -87,6 +106,7 @@ async function begin(){
   const response=await fetch('/api/share/'+encodeURIComponent(token)+'/frames',{cache:'no-store',signal:controller.signal});
   let data={};try{data=await response.json()}catch(e){}
   if(!response.ok)throw Error(data.detail||('BAM server returned '+response.status));
+  showVehicleDetails(data.vehicle_details);
   frames=data.frames;
   if(!Array.isArray(frames)||!frames.length)throw Error('No vehicle images are currently available.');
   $('loadText').textContent='Opening the vehicle…';$('loadDetail').textContent='Preparing the first of '+frames.length+' angles.';

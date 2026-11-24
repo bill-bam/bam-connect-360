@@ -130,16 +130,35 @@ def _unb64(data: str) -> bytes:
     return base64.urlsafe_b64decode(data + "=" * (-len(data) % 4))
 
 
-def make_share_token(job_id: str, exp: int) -> str:
-    payload = _b64(json.dumps({"v": 1, "j": job_id, "exp": exp}, separators=(",", ":")).encode())
+def clean_vehicle_details(value) -> dict[str, str]:
+    if not isinstance(value, dict):
+        return {}
+    limits = {"make": 80, "model": 120, "registration": 24, "vin": 40, "bam_reference": 80}
+    result = {}
+    for key, limit in limits.items():
+        raw = value.get(key)
+        if not isinstance(raw, str):
+            continue
+        text = " ".join(raw.split())[:limit]
+        if text:
+            result[key] = text.upper() if key in ("registration", "vin") else text
+    return result
+
+
+def make_share_token(job_id: str, exp: int, vehicle_details=None) -> str:
+    data = {"v": 1, "j": job_id, "exp": exp}
+    metadata = clean_vehicle_details(vehicle_details)
+    if metadata:
+        data["vehicle"] = metadata
+    payload = _b64(json.dumps(data, separators=(",", ":")).encode())
     digest = hmac.new(_share_secret(), payload.encode("ascii"), hashlib.sha256).digest()
     return payload + "." + _b64(digest)
 
 
-def verify_share_token(token: str) -> str:
+def share_token_payload(token: str) -> dict:
     try:
         parts = token.split(".")
-        if len(parts) != 2 or len(parts[0]) > 512 or len(parts[1]) > 128:
+        if len(parts) != 2 or len(parts[0]) > 4096 or len(parts[1]) > 128:
             raise ValueError("Invalid token")
         expected = _b64(hmac.new(_share_secret(), parts[0].encode("ascii"), hashlib.sha256).digest())
         if not hmac.compare_digest(parts[1], expected):
@@ -149,11 +168,15 @@ def verify_share_token(token: str) -> str:
             raise ValueError("Bad payload")
         if not isinstance(data.get("exp"), int) or time.time() >= data["exp"]:
             raise HTTPException(410, "This buyer link has expired. Ask the sender for a new link.")
-        return data["j"]
+        return data
     except HTTPException:
         raise
     except (ValueError, TypeError, KeyError, UnicodeError):
         raise HTTPException(404, "Buyer link not found")
+
+
+def verify_share_token(token: str) -> str:
+    return share_token_payload(token)["j"]
 
 
 def share_headers() -> dict[str, str]:
@@ -291,7 +314,19 @@ async def create_buyer_link(job_id: str, request: Request):
     if str(job.get("status", "")).lower() != "succeeded" or not get_frames(job):
         raise HTTPException(409, "This job has not finished generating its 360 frames")
     expires_at = int(time.time()) + SHARE_TTL_SECONDS
-    token = make_share_token(job_id, expires_at)
+    vehicle_details = {}
+    if "application/json" in request.headers.get("content-type", ""):
+        if int(request.headers.get("content-length", "0") or 0) > 8192:
+            raise HTTPException(413, "Vehicle details are too large")
+        try:
+            raw = await request.body()
+            if len(raw) > 8192:
+                raise HTTPException(413, "Vehicle details are too large")
+            body = json.loads(raw)
+            vehicle_details = clean_vehicle_details(body.get("vehicle_details")) if isinstance(body, dict) else {}
+        except (ValueError, TypeError):
+            raise HTTPException(422, "Invalid vehicle details")
+    token = make_share_token(job_id, expires_at, vehicle_details)
     base = (os.getenv("BAM_PUBLIC_URL") or os.getenv("RENDER_EXTERNAL_URL") or "").strip().rstrip("/")
     if not base:
         # Use the incoming deployment domain when no canonical public URL is configured.
@@ -315,7 +350,7 @@ async def buyer_frames(token: str):
     if not frames:
         raise HTTPException(410, "The generated images are no longer available. Ask for a new export.")
     # Expose only frame URLs and angles, not the upstream provider job metadata.
-    return JSONResponse({"job_id": job_id, "frame_count": len(frames), "frames": [{"angle": angle, "url": url} for angle, url in frames]}, headers=share_headers())
+    return JSONResponse({"job_id": job_id, "vehicle_details": clean_vehicle_details(share_token_payload(token).get("vehicle")), "frame_count": len(frames), "frames": [{"angle": angle, "url": url} for angle, url in frames]}, headers=share_headers())
 
 
 @app.get("/api/share/{token}/video.mp4")
