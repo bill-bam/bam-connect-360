@@ -9,13 +9,26 @@ main{max-width:1050px;margin:auto;padding:40px 20px 70px}.eyebrow{font-size:11px
 @media(max-width:560px){header{padding:15px 18px}.head-right{display:none}main{padding:27px 12px 40px}.bar{padding:15px 14px}.intro{padding:0 8px}.stage{height:340px}.bottom .btn{width:100%}}
 
 [hidden]{display:none!important}.loading[hidden]{display:none!important}.loading .load-message{font-size:13px;font-weight:600;color:#81818a;margin-top:12px;max-width:310px;line-height:1.55}.loading .load-inner{display:grid;justify-items:center;gap:8px}.loading .load-inner .btn{margin-top:14px}
+
+.video-progress{margin-top:18px;padding:20px;border:1px solid #d9d9df;border-left:4px solid #e62237;border-radius:12px;background:white;display:flex;gap:16px;align-items:flex-start}
+.video-spinner{flex:none;width:26px;height:26px;border:3px solid #eee;border-top-color:#e62237;border-radius:50%;animation:video-spin 1s linear infinite}
+.video-progress h2{font-size:18px;margin:0 0 8px}.video-progress p{margin:0 0 8px;font-size:14px;line-height:1.55;color:#666}.video-progress .btn{margin:8px 8px 0 0}.video-progress a{display:inline-block;text-decoration:none}.video-time{font-variant-numeric:tabular-nums;font-size:13px;color:#777}
+@keyframes video-spin{to{transform:rotate(360deg)}}@media(prefers-reduced-motion:reduce){.video-spinner{animation:none}}
 </style></head><body>
 <header><div style="display:flex;align-items:center;gap:13px"><div class="brand">BAM<em>.</em></div><div class="brand-sub">CONNECT 360</div></div><div class="head-right">INTERACTIVE VEHICLE PRESENTATION</div></header>
 <main><div class="intro"><div class="eyebrow">YOUR VEHICLE · 360° VIEW</div><h1>Explore the vehicle from every angle.</h1><p>Swipe, drag or use the controls to rotate the vehicle. Download the marketing video below.</p></div>
 <section class="card"><div class="stage" id="stage" aria-label="Swipe or drag to rotate the vehicle"><img id="img" alt="AI-generated 360-degree view of vehicle" draggable="false"><div class="frame-badge">360° INTERACTIVE</div><div class="angle-badge" id="angle">0°</div><div class="loading" id="loading"><div class="load-inner"><div id="loadText">Connecting to your vehicle presentation…</div><div class="load-message" id="loadDetail">Retrieving the 360° image sequence.</div><button class="btn red" id="retryLoad" type="button" hidden>Try again</button></div></div></div>
 <div class="bar"><div class="controls"><button id="previous" class="btn" aria-label="Rotate left">‹</button><button id="play" class="btn dark" disabled>▶ Auto rotate</button><button id="next" class="btn" aria-label="Rotate right">›</button><button id="zoomOut" class="btn" aria-label="Zoom out">− Zoom</button><button id="zoomIn" class="btn" aria-label="Zoom in">＋ Zoom</button><button id="reset" class="btn">Reset</button><button id="fullscreen" class="btn" aria-label="Full screen">⛶</button></div>
 <input type="range" id="scrub" min="0" max="1" value="0" aria-label="Vehicle rotation"><div class="status small" id="status"></div></div></section>
-<div class="bottom"><div><div class="eyebrow" style="margin-bottom:7px">DOWNLOAD VIDEO</div><div style="font-size:13px;color:#777">Full HD MP4 · ready for use in vehicle marketing</div><div class="download-status" id="downloadStatus">Video will be assembled when you request it.</div></div><button class="btn red" id="download" disabled>↓ Download marketing video (MP4)</button></div>
+<div class="bottom"><div><div class="eyebrow" style="margin-bottom:7px">DOWNLOAD VIDEO</div><div style="font-size:13px;color:#777">Full HD MP4 · ready for use in vehicle marketing</div><div class="download-status" id="downloadStatus">Created on request. Please allow a few minutes while your video is prepared.</div></div><button class="btn red" id="download" disabled>↓ Download marketing video (MP4)</button></div>
+<section id="videoProgress" class="video-progress" hidden aria-live="polite" aria-atomic="true">
+<div id="videoSpinner" class="video-spinner" aria-hidden="true"></div><div>
+<h2 id="videoTitle">Creating your video…</h2>
+<p id="videoDetail">We are assembling the Full HD MP4 from your vehicle’s 360° images. Keep this page open. You can still explore the vehicle above.</p>
+<div id="videoElapsed" class="video-time"></div>
+<button id="cancelVideo" class="btn" type="button">Cancel download</button>
+<a id="saveVideo" class="btn red" hidden>Save MP4</a>
+</div></section>
 <div class="note">This 360° presentation is AI-generated from four photographs. Please verify the vehicle's condition, specification and identifying details independently before using the media in an advertisement. Sharing this link allows the recipient to view and download the vehicle media.</div></main>
 <script>
 (()=>{'use strict';
@@ -32,9 +45,34 @@ for(const event of ['pointerup','pointercancel'])$('stage').addEventListener(eve
 function changeZoom(delta){zoom=Math.max(1,Math.min(3,zoom+delta));$('img').style.setProperty('--zoom',zoom)}
 $('zoomOut').onclick=()=>changeZoom(-.25);$('zoomIn').onclick=()=>changeZoom(.25);$('reset').onclick=()=>{stop();show(0);zoom=1;$('img').style.setProperty('--zoom',1)};
 $('fullscreen').onclick=async()=>{try{if(document.fullscreenElement)await document.exitFullscreen();else await $('stage').requestFullscreen()}catch(e){$('status').textContent='Full screen is not available on this browser'}};
-$('download').onclick=()=>{
- $('downloadStatus').textContent='Preparing the Full HD MP4 from up to 152 frames. The download may take a few minutes on the trial server.';
- location.href='/api/share/'+encodeURIComponent(token)+'/video.mp4';
+let videoController=null,videoUrl=null;
+$('cancelVideo').onclick=()=>videoController?.abort();
+window.addEventListener('beforeunload',()=>{videoController?.abort();if(videoUrl)URL.revokeObjectURL(videoUrl)});
+$('download').onclick=async()=>{
+ if(videoController)return;
+ if(videoUrl){URL.revokeObjectURL(videoUrl);videoUrl=null;}
+ const controller=new AbortController();videoController=controller;const started=Date.now();
+ $('download').disabled=true;$('download').textContent='Creating your video…';
+ $('videoProgress').hidden=false;$('videoSpinner').hidden=false;$('cancelVideo').hidden=false;$('saveVideo').hidden=true;
+ $('videoTitle').textContent='Creating your video…';
+ $('videoDetail').textContent='We are assembling the Full HD MP4 from your vehicle’s 360° images. Keep this page open. You can still explore the vehicle above.';
+ $('downloadStatus').textContent='Preparing your video — please keep this page open.';
+ const elapsed=()=>{const seconds=Math.floor((Date.now()-started)/1000);$('videoElapsed').textContent=`Elapsed: ${Math.floor(seconds/60)}:${String(seconds%60).padStart(2,'0')}`;if(seconds>=60&&$('videoTitle').textContent==='Creating your video…')$('videoDetail').textContent='Your video is still being prepared. This can take several minutes on the trial service. Keep this page open; there is no need to click Download again.';};
+ elapsed();const clock=setInterval(elapsed,1000);
+ try{
+  const response=await fetch('/api/share/'+encodeURIComponent(token)+'/video.mp4',{cache:'no-store',signal:controller.signal});
+  if(!response.ok){let message='The video service could not complete this download. Please try again.';try{const data=await response.json();if(typeof data.detail==='string')message=data.detail;}catch{}throw Error(message);}
+  if(!response.headers.get('content-type')?.includes('video/mp4'))throw Error('The service did not return an MP4 video. Please try again.');
+  $('videoTitle').textContent='Receiving your video…';
+  const total=Number(response.headers.get('content-length'))||0;let received=0;const chunks=[];
+  if(response.body?.getReader){const reader=response.body.getReader();for(;;){const {done,value}=await reader.read();if(done)break;chunks.push(value);received+=value.byteLength;$('videoDetail').textContent=total?`Downloading: ${Math.min(100,Math.floor(received/total*100))}%`:`Receiving video: ${(received/1024/1024).toFixed(1)} MB`;}}
+  else{chunks.push(await response.blob());}
+  const blob=new Blob(chunks,{type:'video/mp4'});if(!blob.size)throw Error('The downloaded video was empty. Please try again.');
+  videoUrl=URL.createObjectURL(blob);$('saveVideo').href=videoUrl;$('saveVideo').download='BAM_360_Marketing_Video.mp4';$('saveVideo').hidden=false;
+  $('videoTitle').textContent='Your video is ready';$('videoDetail').textContent='The download has been started. If your browser does not save it automatically, select Save MP4 below.';
+  $('downloadStatus').textContent='Video ready — check your browser downloads.';$('saveVideo').click();
+ }catch(error){const canceled=error.name==='AbortError';$('videoTitle').textContent=canceled?'Download cancelled':'Video download could not finish';$('videoDetail').textContent=canceled?'You can start the download again whenever you are ready.':error.message;$('downloadStatus').textContent=canceled?'Download cancelled.':'Download failed — please try again.';}
+ finally{clearInterval(clock);videoController=null;$('videoSpinner').hidden=true;$('cancelVideo').hidden=true;$('download').disabled=false;$('download').textContent='Download marketing video (MP4)';}
 };
 let attemptNumber=0;
 const retryButton=$('retryLoad');
