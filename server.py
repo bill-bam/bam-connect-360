@@ -1,4 +1,7 @@
-"""BAM.Connect 360 trial: server-side CarHub proxy. No API secret in browser code."""
+"""BAM.Connect 360 trial: server-side CarHub proxy. No API secret in browser code.
+
+CarHub render/360 request contract verified against the official 360 and upload guides.
+"""
 from __future__ import annotations
 import asyncio
 import io
@@ -134,18 +137,35 @@ async def generate(request: Request, images: list[UploadFile] = File(...), frame
         raise HTTPException(422, "Exactly four images are required (front, left, rear, right)")
     if frame_count not in (24, 36, 72):
         raise HTTPException(422, "frame_count must be 24, 36 or 72")
-    files = []
-    for i, img in enumerate(images):
+    # CarHub 360 official contract (24 Nov 2026):
+    # multipart/form-data with exactly one JSON `inputs` ARRAY, exactly one
+    # JSON `params` OBJECT, and four distinct named image file parts.
+    # Each manifest item must reference its file part and state its `role`.
+    # The roles MUST be front, left, rear, right in this order.
+    # https://docs.trycarhub.com/guides/spin-360
+    # https://docs.trycarhub.com/guides/uploads
+    roles = ("front", "left", "rear", "right")
+    manifest = []
+    image_parts = []
+    for index, img in enumerate(images):
         data = await img.read(MAX_IMAGE_BYTES + 1)
         if not data or len(data) > MAX_IMAGE_BYTES:
             raise HTTPException(413, "Each photo must be non-empty and no larger than 20 MiB")
         mime = img.content_type
-        if mime not in ("image/jpeg", "image/png", "image/webp"):
+        extensions = {"image/jpeg": "jpg", "image/png": "png", "image/webp": "webp"}
+        if mime not in extensions:
             raise HTTPException(415, "Use JPEG, PNG, or WebP photos")
-        files.append(("images", (f"{['front','left','rear','right'][i]}.{ {'image/jpeg':'jpg','image/png':'png','image/webp':'webp'}[mime] }", data, mime)))
-    # API documentation confirms repeated `images` parts and optional frame settings.
-    for name, value in [("frame_count", str(frame_count)), ("output_format", "jpg"), ("viewer", "false")]:
-        files.append((name, (None, value)))
+        role = roles[index]
+        manifest.append({"file": role, "role": role, "client_id": f"bam360-{role}"})
+        image_parts.append((role, (f"{role}.{extensions[mime]}", data, mime)))
+
+    params = {"quality": 480, "frame_count": frame_count,
+              "output_format": "jpg", "viewer": False}
+    files = [
+        ("inputs", (None, json.dumps(manifest, separators=(",", ":")), "application/json")),
+        ("params", (None, json.dumps(params, separators=(",", ":")), "application/json")),
+        *image_parts,
+    ]
     raw_id = request.headers.get("X-BAM-Request-ID", "")
     try:
         idem = str(uuid.UUID(raw_id)) if raw_id else str(uuid.uuid4())
