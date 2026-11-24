@@ -1,6 +1,6 @@
 """BAM.Connect 360 trial: server-side CarHub proxy. No API secret in browser code.
 
-CarHub render/360 request contract verified against the official 360 and upload guides.
+Preserves the validated CarHub multipart request; restores the BAM studio asset and 1080/152 output.
 """
 from __future__ import annotations
 import asyncio
@@ -27,7 +27,7 @@ KEY = os.getenv("CARHUB_API_KEY", "").strip()
 PIN = os.getenv("BAM_TRIAL_PIN", "").strip()
 MAX_JOBS = max(1, int(os.getenv("BAM_MAX_GENERATIONS", "5")))
 MAX_IMAGE_BYTES = 20 * 1024 * 1024
-MAX_FRAMES = 72
+MAX_FRAMES = 152
 jobs_started = 0
 # Trial only: in-memory authorisation. Server restarts discard authorised job IDs.
 known_jobs: dict[str, float] = {}
@@ -159,8 +159,20 @@ async def generate(request: Request, images: list[UploadFile] = File(...), frame
         manifest.append({"file": role, "role": role, "client_id": f"bam360-{role}"})
         image_parts.append((role, (f"{role}.{extensions[mime]}", data, mime)))
 
-    params = {"quality": 480, "frame_count": frame_count,
-              "output_format": "jpg", "viewer": False}
+    # BAM.Connect 360: use the previously supplied CarHub studio background asset.
+    # The existing PWA still submits `frame_count=72` in its form; for this trial,
+    # request 152 provider frames explicitly without changing the working multipart
+    # inputs/params structure or the browser capture form.
+    params = {
+        "viewer": False,
+        "quality": 1080,
+        "background": {
+            "asset_id": "01a20b66-75a1-7e00-9aa6-63363169c0dd",
+            "image_ratio": "16:9",
+        },
+        "frame_count": 152,
+        "output_format": "jpg",
+    }
     files = [
         ("inputs", (None, json.dumps(manifest, separators=(",", ":")), "application/json")),
         ("params", (None, json.dumps(params, separators=(",", ":")), "application/json")),
