@@ -4,6 +4,9 @@ Preserves the validated CarHub multipart request; restores the BAM studio asset 
 """
 from __future__ import annotations
 import asyncio
+import base64
+import hashlib
+import hmac
 import io
 import json
 import os
@@ -14,11 +17,11 @@ import time
 import uuid
 import zipfile
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import urlparse, quote
 
 import httpx
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, Response
 from starlette.background import BackgroundTask
 
 ROOT = Path(__file__).resolve().parent
@@ -101,6 +104,66 @@ async def homepage():
 async def interactive_vehicle_demo():
     """Public example of the current BAM 360 presentation; no API credentials are exposed."""
     return FileResponse(ROOT / "viewer.html", media_type="text/html", headers={"Cache-Control": "public, max-age=600"})
+
+
+# Share links are stateless, signed references to successful CarHub jobs.
+# They remain valid across server restarts provided API key/PIN (or BAM_SHARE_SECRET)
+# remain unchanged, but depend on CarHub continuing to retain the frame assets.
+# Do not expose the generation PIN or secret in buyer links.
+SHARE_TTL_SECONDS = max(3600, min(30 * 86400, int(os.getenv("BAM_SHARE_LINK_DAYS", "7")) * 86400))
+
+
+def _share_secret() -> bytes:
+    dedicated = os.getenv("BAM_SHARE_SECRET", "").strip()
+    if dedicated:
+        return dedicated.encode("utf-8")
+    # Existing deployment works without further setup. If either credential
+    # changes, previously signed links will cease to validate.
+    return hashlib.sha256(("BAM360-share-v1\0" + KEY + "\0" + PIN).encode()).digest()
+
+
+def _b64(data: bytes) -> str:
+    return base64.urlsafe_b64encode(data).decode("ascii").rstrip("=")
+
+
+def _unb64(data: str) -> bytes:
+    return base64.urlsafe_b64decode(data + "=" * (-len(data) % 4))
+
+
+def make_share_token(job_id: str, exp: int) -> str:
+    payload = _b64(json.dumps({"v": 1, "j": job_id, "exp": exp}, separators=(",", ":")).encode())
+    digest = hmac.new(_share_secret(), payload.encode("ascii"), hashlib.sha256).digest()
+    return payload + "." + _b64(digest)
+
+
+def verify_share_token(token: str) -> str:
+    try:
+        parts = token.split(".")
+        if len(parts) != 2 or len(parts[0]) > 512 or len(parts[1]) > 128:
+            raise ValueError("Invalid token")
+        expected = _b64(hmac.new(_share_secret(), parts[0].encode("ascii"), hashlib.sha256).digest())
+        if not hmac.compare_digest(parts[1], expected):
+            raise ValueError("Bad signature")
+        data = json.loads(_unb64(parts[0]))
+        if data.get("v") != 1 or not isinstance(data.get("j"), str) or not data["j"] or len(data["j"]) > 200:
+            raise ValueError("Bad payload")
+        if not isinstance(data.get("exp"), int) or time.time() >= data["exp"]:
+            raise HTTPException(410, "This buyer link has expired. Ask the sender for a new link.")
+        return data["j"]
+    except HTTPException:
+        raise
+    except (ValueError, TypeError, KeyError, UnicodeError):
+        raise HTTPException(404, "Buyer link not found")
+
+
+def share_headers() -> dict[str, str]:
+    return {"Cache-Control": "no-store", "X-Robots-Tag": "noindex, nofollow, noarchive", "Referrer-Policy": "no-referrer"}
+
+
+@app.get("/share/{token}")
+async def buyer_view(token: str):
+    verify_share_token(token)
+    return FileResponse(ROOT / "buyer.html", media_type="text/html", headers=share_headers())
 
 
 @app.get("/manifest.webmanifest")
@@ -215,6 +278,59 @@ async def provider_job(job_id: str) -> dict:
         return response.json()
     except ValueError:
         raise HTTPException(502, "CarHub returned unreadable job data")
+
+
+@app.post("/api/jobs/{job_id}/share")
+async def create_buyer_link(job_id: str, request: Request):
+    # A PIN-authorised operator can share an existing successful job as well,
+    # even after a Render deployment has cleared in-memory known_jobs.
+    auth(request)
+    if not 6 <= len(job_id) <= 160 or not all(c.isascii() and (c.isalnum() or c in "_-") for c in job_id):
+        raise HTTPException(400, "Invalid CarHub job ID")
+    job = unwrap_job(await provider_job(job_id))
+    if str(job.get("status", "")).lower() != "succeeded" or not get_frames(job):
+        raise HTTPException(409, "This job has not finished generating its 360 frames")
+    expires_at = int(time.time()) + SHARE_TTL_SECONDS
+    token = make_share_token(job_id, expires_at)
+    base = (os.getenv("BAM_PUBLIC_URL") or os.getenv("RENDER_EXTERNAL_URL") or "").strip().rstrip("/")
+    if not base:
+        # Use the incoming deployment domain when no canonical public URL is configured.
+        base = str(request.base_url).rstrip("/")
+    if not base.startswith(("https://", "http://")):
+        raise HTTPException(500, "Invalid BAM_PUBLIC_URL configured")
+    url = f"{base}/share/{token}"
+    return JSONResponse({"share_url": url, "download_url": f"{base}/api/share/{token}/video.mp4", "expires_at": expires_at, "temporary": True}, headers=share_headers())
+
+
+@app.get("/api/share/{token}/frames")
+async def buyer_frames(token: str):
+    job_id = verify_share_token(token)
+    try:
+        job = unwrap_job(await provider_job(job_id))
+    except HTTPException:
+        raise HTTPException(502, "The 360 is temporarily unavailable from CarHub")
+    if str(job.get("status", "")).lower() != "succeeded":
+        raise HTTPException(409, "This 360 is not currently available")
+    frames = get_frames(job)
+    if not frames:
+        raise HTTPException(410, "The generated images are no longer available. Ask for a new export.")
+    # Expose only frame URLs and angles, not the upstream provider job metadata.
+    return JSONResponse({"job_id": job_id, "frame_count": len(frames), "frames": [{"angle": angle, "url": url} for angle, url in frames]}, headers=share_headers())
+
+
+@app.get("/api/share/{token}/video.mp4")
+async def buyer_video(token: str):
+    job_id = verify_share_token(token)
+    _, blobs = await download_frames(job_id)
+    handle, path = tempfile.mkstemp(suffix=".mp4", prefix="bam360_shared_")
+    os.close(handle)
+    try:
+        await asyncio.to_thread(make_mp4, blobs, path)
+    except Exception:
+        Path(path).unlink(missing_ok=True)
+        raise HTTPException(500, "Could not prepare the video. Please try again later.")
+    return FileResponse(path, media_type="video/mp4", filename=f"BAM_360_{job_id}.mp4",
+                        headers=share_headers(), background=BackgroundTask(lambda: Path(path).unlink(missing_ok=True)))
 
 
 def check_job(request: Request, job_id: str):

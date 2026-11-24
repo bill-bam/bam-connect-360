@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="robots" content="noindex,nofollow,noarchive"><meta name="referrer" content="no-referrer">
+<meta name="theme-color" content="#121216"><title>BAM.Connect 360 — Vehicle presentation</title>
+<style>
+:root{font-family:Inter,ui-sans-serif,system-ui,-apple-system,Segoe UI,Arial,sans-serif;color:#202027;background:#f3f3f5}*{box-sizing:border-box}body{margin:0}button{font:inherit;cursor:pointer}button:disabled{opacity:.5;cursor:wait}
+header{background:#111116;color:white;padding:19px max(20px,calc((100vw - 1000px)/2));display:flex;gap:15px;align-items:center;justify-content:space-between}.brand{font-size:29px;letter-spacing:-2px;font-weight:950}.brand em{font-style:normal;color:#ed2638}.brand-sub{border-left:1px solid #45454b;padding-left:14px;font-size:11px;font-weight:800;letter-spacing:1.1px;color:#e6e6ea}.head-right{color:#c9c9ce;font-size:10px;letter-spacing:1px;font-weight:800}
+main{max-width:1050px;margin:auto;padding:40px 20px 70px}.eyebrow{font-size:11px;letter-spacing:1.5px;color:#dc2133;font-weight:900}.intro{margin-bottom:25px}h1{font-size:clamp(27px,4.5vw,43px);letter-spacing:-1.4px;margin:8px 0 10px}.intro p{margin:0;color:#71717b;line-height:1.65;font-size:14px}.card{background:#fff;border:1px solid #e4e4e7;border-radius:19px;overflow:hidden;box-shadow:0 7px 25px #1111180c}.stage{height:clamp(260px,53vw,580px);background:linear-gradient(160deg,#fafafa,#ececee);position:relative;display:flex;align-items:center;justify-content:center;overflow:hidden;touch-action:pan-y;user-select:none;cursor:grab}.stage:active{cursor:grabbing}.stage img{height:100%;width:100%;object-fit:contain;pointer-events:none;transform:scale(var(--zoom,1));transform-origin:center;user-select:none}.frame-badge{position:absolute;top:15px;left:15px;color:#fff;background:#e72639;padding:9px 12px;border-radius:99px;font-size:11px;font-weight:900}.angle-badge{position:absolute;right:14px;bottom:14px;background:#ffffffdd;color:#444;padding:8px 13px;border-radius:99px;font-size:11px;font-weight:800}.loading{position:absolute;inset:0;display:grid;place-items:center;text-align:center;padding:20px;font-weight:800;background:#f3f3f5;color:#666}.bar{padding:19px 23px 22px;display:grid;gap:15px}.controls{display:flex;gap:8px;flex-wrap:wrap;align-items:center}.btn{border:1px solid #dddfe2;background:white;border-radius:11px;padding:12px 15px;font-size:12px;font-weight:850;min-height:44px}.btn.dark{background:#19191f;color:white;border-color:#19191f}.btn.red{background:#e62237;color:white;border-color:#e62237}.btn:focus-visible{outline:3px solid #ee8b95;outline-offset:2px}#scrub{width:100%;accent-color:#e62237}.small{font-size:12px;color:#8d8d95;line-height:1.6}.bottom{display:flex;align-items:start;justify-content:space-between;gap:15px;margin-top:17px;flex-wrap:wrap}.bottom .btn{min-width:215px}.note{background:#fff9ed;border:1px solid #f5e5c7;border-radius:11px;padding:15px;margin-top:22px;font-size:12px;line-height:1.6;color:#7b6136}.status{min-height:19px}.error{color:#b51b2b}.ready{color:#138456;font-weight:800}.download-status{font-size:11px;color:#62626b;margin-top:10px}
+@media(max-width:560px){header{padding:15px 18px}.head-right{display:none}main{padding:27px 12px 40px}.bar{padding:15px 14px}.intro{padding:0 8px}.stage{height:340px}.bottom .btn{width:100%}}
+</style></head><body>
+<header><div style="display:flex;align-items:center;gap:13px"><div class="brand">BAM<em>.</em></div><div class="brand-sub">CONNECT 360</div></div><div class="head-right">INTERACTIVE VEHICLE PRESENTATION</div></header>
+<main><div class="intro"><div class="eyebrow">YOUR VEHICLE · 360° VIEW</div><h1>Explore the vehicle from every angle.</h1><p>Swipe, drag or use the controls to rotate the vehicle. Download the marketing video below.</p></div>
+<section class="card"><div class="stage" id="stage" aria-label="Swipe or drag to rotate the vehicle"><img id="img" alt="AI-generated 360-degree view of vehicle" draggable="false"><div class="frame-badge">360° INTERACTIVE</div><div class="angle-badge" id="angle">0°</div><div class="loading" id="loading">Loading your vehicle presentation…</div></div>
+<div class="bar"><div class="controls"><button id="previous" class="btn" aria-label="Rotate left">‹</button><button id="play" class="btn dark" disabled>▶ Auto rotate</button><button id="next" class="btn" aria-label="Rotate right">›</button><button id="zoomOut" class="btn" aria-label="Zoom out">− Zoom</button><button id="zoomIn" class="btn" aria-label="Zoom in">＋ Zoom</button><button id="reset" class="btn">Reset</button><button id="fullscreen" class="btn" aria-label="Full screen">⛶</button></div>
+<input type="range" id="scrub" min="0" max="1" value="0" aria-label="Vehicle rotation"><div class="status small" id="status"></div></div></section>
+<div class="bottom"><div><div class="eyebrow" style="margin-bottom:7px">DOWNLOAD VIDEO</div><div style="font-size:13px;color:#777">Full HD MP4 · ready for use in vehicle marketing</div><div class="download-status" id="downloadStatus">Video will be assembled when you request it.</div></div><button class="btn red" id="download" disabled>↓ Download marketing video (MP4)</button></div>
+<div class="note">This 360° presentation is AI-generated from four photographs. Please verify the vehicle's condition, specification and identifying details independently before using the media in an advertisement. Sharing this link allows the recipient to view and download the vehicle media.</div></main>
+<script>
+(()=>{'use strict';
+const $=id=>document.getElementById(id),token=decodeURIComponent(location.pathname.split('/').filter(Boolean).pop()||'');
+let frames=[],i=0,timer=null,zoom=1,dragging=false,startX=0;
+function urlFor(f){return f.url}
+function show(n){if(!frames.length)return;i=(n+frames.length)%frames.length;const f=frames[i];$('img').src=urlFor(f);$('scrub').value=String(i);$('angle').textContent=Math.round(Number(f.angle)||i*360/frames.length)+'°'}
+function stop(){if(timer)clearInterval(timer);timer=null;$('play').textContent='▶ Auto rotate'}
+function play(){if(timer){stop();return}timer=setInterval(()=>show(i+1),85);$('play').textContent='Ⅱ Pause spin'}
+$('play').onclick=play;$('previous').onclick=()=>{stop();show(i-1)};$('next').onclick=()=>{stop();show(i+1)};$('scrub').oninput=e=>{stop();show(+e.target.value)};
+$('stage').addEventListener('pointerdown',e=>{if(!frames.length)return;stop();dragging=true;startX=e.clientX;$('stage').setPointerCapture(e.pointerId)});
+$('stage').addEventListener('pointermove',e=>{if(!dragging)return;const delta=e.clientX-startX;const steps=Math.trunc(delta/6);if(steps){show(i-steps);startX+=steps*6}});
+for(const event of ['pointerup','pointercancel'])$('stage').addEventListener(event,()=>dragging=false);
+function changeZoom(delta){zoom=Math.max(1,Math.min(3,zoom+delta));$('img').style.setProperty('--zoom',zoom)}
+$('zoomOut').onclick=()=>changeZoom(-.25);$('zoomIn').onclick=()=>changeZoom(.25);$('reset').onclick=()=>{stop();show(0);zoom=1;$('img').style.setProperty('--zoom',1)};
+$('fullscreen').onclick=async()=>{try{if(document.fullscreenElement)await document.exitFullscreen();else await $('stage').requestFullscreen()}catch(e){$('status').textContent='Full screen is not available on this browser'}};
+$('download').onclick=()=>{
+ $('downloadStatus').textContent='Preparing download from generated frames. For 152 frames this may take a little while…';
+ location.href='/api/share/'+encodeURIComponent(token)+'/video.mp4';
+};
+async function begin(){try{const response=await fetch('/api/share/'+encodeURIComponent(token)+'/frames',{cache:'no-store'});let data={};try{data=await response.json()}catch(e){}
+if(!response.ok)throw Error(data.detail||'This vehicle presentation is no longer available');
+frames=data.frames;if(!Array.isArray(frames)||!frames.length)throw Error('No vehicle images available');$('scrub').max=String(frames.length-1);$('loading').hidden=true;$('play').disabled=false;$('download').disabled=false;
+show(0);$('status').innerHTML='<span class="ready">'+frames.length+' angles ready · Swipe left or right to inspect the vehicle</span>';}
+catch(e){$('loading').textContent='Unable to load this vehicle';$('status').textContent=e.message;$('status').classList.add('error');}}
+begin();
+})();
+</script></body></html>
