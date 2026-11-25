@@ -253,7 +253,7 @@ async def generate(request: Request, images: list[UploadFile] = File(...), frame
         "viewer": False,
         "quality": 1080,
         "background": {
-            "asset_id": "01a20b66-75a1-7e00-9aa6-63363169c0dd",
+            "asset_id": "01a20da2-77d3-7b60-955f-376a372b20f4",
             "image_ratio": "16:9",
         },
         "frame_count": 152,
